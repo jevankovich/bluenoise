@@ -234,17 +234,17 @@ array binomial(size_t len) {
     return out;
 }
 
-array white_noise(size_t w, size_t h, uint32_t seed, uint32_t n, uint32_t m) {
-    array out = new_array(w, h);
+void permute(float *arr, size_t len, uint32_t seed) {
     pcg32_srandom(seed, 0);
 
-    for (size_t y = 0; y < h; y++) {
-        for (size_t x = 0; x < w; x++) {
-            *at(out, x, y) = pcg32_boundedrand(m) < n;
-        }
+    // Fisher-Yates Shuffle
+    for (size_t i = 0; i < len - 1; i++) {
+        float tmp;
+        size_t rand = pcg32_boundedrand(len - i) + i;
+        tmp = arr[i];
+        arr[i] = arr[rand];
+        arr[rand] = tmp;
     }
-
-    return out;
 }
 
 static inline void little_endian(uint16_t x, uint8_t *out) {
@@ -460,7 +460,15 @@ int main(int argc, char **argv) {
     }
 
     kern = binomial(conv_size);
-    mask = white_noise(width, height, seed, fracn, fracd);
+
+    mask = new_array(width, height);
+    for (size_t i = 0; i < width * height; i++) {
+        mask.mem[i] = (i * fracd) < (width * height * fracn);
+    }
+
+    permute(mask.mem, width * height, seed);
+
+    write_pbm("initial_mask.pbm", mask);
 
     image = blue_noise(mask, kern);
 
