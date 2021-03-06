@@ -118,6 +118,8 @@ static inline void copy_arr(array to, array from) {
     }
 }
 
+__attribute__ ((flatten))
+__attribute__ ((target_clones("default,avx,avx2")))
 void conv1d(array in, array kern, array out) {
     size_t mid = kern.w / 2;
 
