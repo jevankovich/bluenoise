@@ -425,7 +425,7 @@ int main(int argc, char **argv) {
     array image;
 
     uint32_t seed = 0;
-    size_t conv_size = 11;
+    size_t conv_size = 9; // The paper recommends sigma = 1.5. 9 gets us to 1.5
 
     if (argc < 3) {
         fprintf(stderr, "Usage: %s width height [fracd | fracn fracd] [conv_size] [seed]\n", argv[0]);
