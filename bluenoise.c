@@ -154,9 +154,12 @@ array repeat2d(array in, size_t dilation) {
     size_t mid = dilation / 2;
     array out = new_array(in.w + dilation - 1, in.h + dilation - 1);
 
+    size_t w_over = in.w * ((out.w + in.w) / in.w);
+    size_t h_over = in.h * ((out.h + in.h) / in.h);
+
     for (size_t y = 0; y < out.h; y++) {
         for (size_t x = 0; x < out.w; x++) {
-            *at(out, x, y) = *at(in, (in.w + x - mid) % in.w, (in.h + y - mid) % in.h);
+            *at(out, x, y) = *at(in, (w_over + x - mid) % in.w, (h_over + y - mid) % in.h);
         }
     }
 
