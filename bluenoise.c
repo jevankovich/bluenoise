@@ -9,6 +9,7 @@
 #include <math.h>
 #include <inttypes.h>
 #include <unistd.h>
+#include <limits.h>
 
 #include "pcg_basic.h"
 
@@ -26,6 +27,11 @@ typedef struct {
     size_t to;
     size_t by;
 } range;
+
+char name_suffix[128];
+char initial_mask_name[NAME_MAX + 1];
+char mask_name[NAME_MAX + 1];
+char noise_name[NAME_MAX + 1];
 
 array new_array(size_t w, size_t h) {
     return (array){
@@ -543,7 +549,7 @@ array blue_noise(array mask, array kern) {
 
     relax(mask, kern, conv, work, cxs, vxs);
     copy_arr(backup, mask);
-    write_pbm("mask.pbm", inset_mask);
+    write_pbm(mask_name, inset_mask);
 
     for (size_t i = rank; i != 0; i--) {
         size_t cx, cy;
@@ -573,7 +579,24 @@ array blue_noise(array mask, array kern) {
     return values;
 }
 
+void usage(FILE *f, char *prog) {
+    fprintf(f, "Usage: %s [options] width height\n\n", prog);
+    fprintf(f, "-n numerator\tThe numerator used to determine the fraction of pixels set\n"
+               "\t\tin the initial mask. (Default: 1)\n");
+    fprintf(f, "-d denominator\tThe denominator used to determine the fraction of pixels set\n"
+               "\t\tin the initial mask. (Default: 10)\n");
+    fprintf(f, "-c kernel size\tThe size of the kernel to use in filtering. The original\n"
+               "\t\tpaper recommends a kernel with std-deviation of 1.5.\n"
+               "\t\tThe std-deviation of the kernel is sqrt(n/4). (Default: 9)\n");
+    fprintf(f, "-s seed\t\tThe seed to use for the RNG when generating the initial mask\n"
+               "\t\t(Default: 0)\n");
+}
+
 int main(int argc, char **argv) {
+    int c;
+    char *end;
+    long value;
+
     size_t width, height;
     uint32_t fracn = 1, fracd = 10;
 
@@ -584,19 +607,96 @@ int main(int argc, char **argv) {
     uint32_t seed = 0;
     size_t conv_size = 9; // The paper recommends sigma = 1.5. 9 gets us to 1.5
 
-    if (argc < 3) {
-        fprintf(stderr, "Usage: %s width height [fracd | fracn fracd] [conv_size] [seed]\n", argv[0]);
-        exit(EXIT_FAILURE);
+    while ((c = getopt(argc, argv, "hn:d:c:s:")) != -1) {
+        switch(c) {
+        case 'n':
+            value = strtol(optarg, &end, 0);
+            if (*end) {
+                fprintf(stderr, "Could not parse -n argument\n");
+                continue;
+            }
+            if (value <= 0) {
+                fprintf(stderr, "The argument to -n must be positive\n");
+                continue;
+            }
+            fracn = value;
+            break;
+        case 'd':
+            value = strtol(optarg, &end, 0);
+            if (*end) {
+                fprintf(stderr, "Could not parse -%c argument\n", c);
+                continue;
+            }
+            if (value <= 0) {
+                fprintf(stderr, "The argument to -%c must be positive\n", c);
+                continue;
+            }
+            fracd = value;
+            break;
+        case 'c':
+            value = strtol(optarg, &end, 0);
+            if (*end) {
+                fprintf(stderr, "Could not parse -%c argument\n", c);
+                continue;
+            }
+            if (value <= 0) {
+                fprintf(stderr, "The argument to -%c must be positive\n", c);
+                continue;
+            }
+            conv_size = atol(optarg);
+            break;
+        case 's':
+            value = strtol(optarg, &end, 0);
+            if (*end) {
+                fprintf(stderr, "Could not parse -%c argument\n", c);
+                continue;
+            }
+            if (value < 0) {
+                fprintf(stderr, "The argument to -%c must be non-negative\n", c);
+                continue;
+            }
+            seed = atol(optarg);
+            break;
+        case 'h':
+            usage(stdout, argv[0]);
+            return 0;
+        case '?':
+            usage(stderr, argv[0]);
+            return 1;
+        default:
+            abort();
+        }
     }
 
-    width = atol(argv[1]);
-    height = atol(argv[2]);
+    if (argc < optind + 1) {
+        usage(stderr, argv[0]);
+        return 1;
+    }
 
-    if (argc > 4) {
-        fracn = atol(argv[3]);
-        fracd = atol(argv[4]);
-    } else if (argc == 4) {
-        fracd = atol(argv[3]);
+    {
+        value = strtol(argv[optind], &end, 0);
+        if (*end) {
+            fprintf(stderr, "Could not parse width\n");
+            return 1;
+        }
+        if (value <= 0) {
+            fprintf(stderr, "The width must be positive\n");
+            return 1;
+        }
+        width = value;
+    }
+
+    {
+        value = strtol(argv[optind], &end, 0);
+        if (*end) {
+            fprintf(stderr, "Could not parse height\n");
+            return 1;
+        }
+        if (value <= 0) {
+            fprintf(stderr, "The height must be positive\n");
+            return 1;
+        }
+        height = value;
     }
 
     if (fracn * 2 >= fracd) {
@@ -604,17 +704,15 @@ int main(int argc, char **argv) {
         exit(EXIT_FAILURE);
     }
 
-    if (argc > 5) {
-        conv_size = atol(argv[5])/* | 1*/;
-    }
-    if (argc > 6) {
-        seed = atol(argv[6]);
-    }
-
     // if (sqrt(fracn / fracd) <= 2 / conv_size)
     if (fracd >= fracn * conv_size * conv_size / 4) {
         fprintf(stderr, "Warning: it is expected that each pixel in the mask will have fewer than one neighbor\n");
     }
+
+    snprintf(name_suffix, sizeof(name_suffix), "%zux%zu_n%"PRIu32"_d%"PRIu32"_s%"PRIu32, width, height, fracn, fracd, seed);
+    snprintf(initial_mask_name, sizeof(initial_mask_name), "initial_mask_%s.pbm", name_suffix);
+    snprintf(mask_name, sizeof(mask_name), "mask_%s.pbm", name_suffix);
+    snprintf(noise_name, sizeof(noise_name), "noise_%s.pgm", name_suffix);
 
     kern = binomial(conv_size);
 
@@ -625,11 +723,11 @@ int main(int argc, char **argv) {
 
     permute(mask.mem, width * height, seed);
 
-    write_pbm("initial_mask.pbm", mask);
+    write_pbm(initial_mask_name, mask);
 
     image = blue_noise(mask, kern);
 
-    write_pgm("noise.pgm", image, UINT16_MAX);
+    write_pgm(noise_name, image, UINT16_MAX);
 
     free_array(kern);
     free_array(mask);
