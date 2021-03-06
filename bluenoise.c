@@ -185,17 +185,28 @@ void conv2d_set(array in, array kern, array out, float *work, size_t x, size_t y
 
     set_repeat(in, kern.w, x, y, val);
 
-    range in_x_range = from_to(x - MIN(mid, x), MIN(in.w, x + kern.w + (kern.w - mid - 1)));
-    range in_y_range = from_to(y - MIN(mid, y), MIN(in.h, y + kern.w + (kern.w - mid - 1)));
+#ifdef PARANOID
+    {
+        array work_arr = (array){.mem = work, .w = out.w, .h = in.h, .xs = 1, .ys = out.w};
+        conv2d(in, kern, out, work_arr);
+    }
+#else
+    for (size_t row = (y + mid) % out.h; row < in.h; row += out.h) {
+        for (size_t col = (x + mid) % out.w; col < in.w; col += out.w) {
+            range out_x_range = from_to(col - MIN(kern.w - 1, col), MIN(out.w, col + 1));
+            range out_y_range = from_to(row - MIN(kern.w - 1, row), MIN(out.h, row + 1));
 
-    range out_x_range = from_to(x - MIN(mid, x), MIN(out.w, x + kern.w - mid));
-    range out_y_range = from_to(y - MIN(mid, y), MIN(out.h, y + kern.w - mid));
+            range in_x_range = from_to(out_x_range.from, out_x_range.to + kern.w - 1);
+            range in_y_range = from_to(out_y_range.from, out_y_range.to + kern.w - 1);
 
-    array in_slice = slice(in, in_x_range, in_y_range);
-    array out_slice = slice(out, out_x_range, out_y_range);
-    array work_arr = (array){.mem = work, .w = out_slice.w, .h = in_slice.h, .xs = 1, .ys = out_slice.w};
+            array in_slice = slice(in, in_x_range, in_y_range);
+            array out_slice = slice(out, out_x_range, out_y_range);
+            array work_arr = (array){.mem = work, .w = out_slice.w, .h = in_slice.h, .xs = 1, .ys = out_slice.w};
 
-    conv2d(in_slice, kern, out_slice, work_arr);
+            conv2d(in_slice, kern, out_slice, work_arr);
+        }
+    }
+#endif
 }
 
 array binomial(size_t len) {
@@ -471,6 +482,7 @@ int main(int argc, char **argv) {
     write_pbm("initial_mask.pbm", mask);
 
     image = blue_noise(mask, kern);
+    image = repeat2d(image, width + 1);
 
     write_pgm("noise.pgm", image, UINT16_MAX);
 
