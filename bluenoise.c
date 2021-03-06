@@ -119,8 +119,6 @@ static inline void copy_arr(array to, array from) {
 }
 
 void conv1d(array in, array kern, array out) {
-    size_t mid = kern.w / 2;
-
     assert(in.h == 1);
     assert(kern.h == 1);
     assert(out.h == 1);
@@ -129,7 +127,7 @@ void conv1d(array in, array kern, array out) {
     zero_arr(out);
     for (size_t i = 0; i < out.w; i++) {
         for (size_t k = 0; k < kern.w; k++) {
-            *at(out, i, 0) += *at(kern, k, 0) * *at(in, i + mid + mid - k, 0);
+            *at(out, i, 0) += *at(kern, k, 0) * *at(in, i + kern.w - 1 - k, 0);
         }
     }
 }
