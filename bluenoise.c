@@ -297,6 +297,8 @@ void write_pbm(const char *fname, array data) {
     fclose(f);
 }
 
+__attribute__ ((flatten))
+__attribute__ ((target_clones("default,avx,avx2")))
 void find_cluster(array mask, array conv, size_t *x, size_t *y) {
     assert(mask.w == conv.w);
     assert(mask.h == conv.h);
@@ -318,6 +320,8 @@ void find_cluster(array mask, array conv, size_t *x, size_t *y) {
     }
 }
 
+__attribute__ ((flatten))
+__attribute__ ((target_clones("default,avx,avx2")))
 void find_void(array mask, array conv, size_t *x, size_t *y) {
     assert(mask.w == conv.w);
     assert(mask.h == conv.h);
