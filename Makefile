@@ -18,6 +18,10 @@ fast: ${TARGET}
 debug: OPT_FLAGS := -Og -ggdb3
 debug: ${TARGET}
 
+.PHONY: paranoid
+paranoid: CFLAGS += -DPARANOID
+paranoid: ${TARGET}
+
 .PHONY: clean
 clean:
 	rm -f ${TARGET}
