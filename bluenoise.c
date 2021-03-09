@@ -263,6 +263,14 @@ void permute(float *arr, size_t len, uint32_t seed) {
     }
 }
 
+void white_noise(array arr, float scale) {
+    for (size_t row = 0; row < arr.h; row++) {
+        for (size_t col = 0; col < arr.w; col++) {
+            *at(arr, col, row) = scale * pcg32_random() / UINT32_MAX;
+        }
+    }
+}
+
 static inline void little_endian(uint16_t x, uint8_t *out) {
     out[0] = (x >> 8) & 0xFF;
     out[1] = (x >> 0) & 0xFF;
@@ -313,55 +321,13 @@ void write_pbm(const char *fname, array data) {
     fclose(f);
 }
 
-void find_cluster(array mask, array conv, size_t *x, size_t *y) {
-    assert(mask.w == conv.w);
-    assert(mask.h == conv.h);
-
-    float cmp = -INFINITY;
-
-    *x = 0;
-    *y = 0;
-
-    for (size_t row = 0; row < conv.h; row++) {
-        for (size_t col = 0; col < conv.w; col++) {
-            float val = *at(conv, col, row);
-            if (val > cmp && *at(mask, col, row) == 1.0f) {
-                cmp = val;
-                *x = col;
-                *y = row;
-            }
-        }
-    }
-}
-
-void find_void(array mask, array conv, size_t *x, size_t *y) {
-    assert(mask.w == conv.w);
-    assert(mask.h == conv.h);
-
-    float cmp = INFINITY;
-
-    *x = 0;
-    *y = 0;
-
-    for (size_t row = 0; row < conv.h; row++) {
-        for (size_t col = 0; col < conv.w; col++) {
-            float val = *at(conv, col, row);
-            if (val < cmp && *at(mask, col, row) == 0.0f) {
-                cmp = val;
-                *x = col;
-                *y = row;
-            }
-        }
-    }
-}
-
-void scan_clusters(array mask, array conv, size_t *xs) {
+void scan_clusters(array mask, array conv, array bias, size_t *xs) {
     for (size_t row = 0; row < conv.h; row++) {
         float cmp = -INFINITY;
         xs[row] = 0;
 
         for (size_t col = 0; col < conv.w; col++) {
-            float val = *at(conv, col, row);
+            float val = *at(conv, col, row) + *at(bias, col, row);
             if (val > cmp && *at(mask, col, row) == 1.0f) {
                 cmp = val;
                 xs[row] = col;
@@ -370,13 +336,13 @@ void scan_clusters(array mask, array conv, size_t *xs) {
     }
 }
 
-void scan_voids(array mask, array conv, size_t *xs) {
+void scan_voids(array mask, array conv, array bias, size_t *xs) {
     for (size_t row = 0; row < conv.h; row++) {
         float cmp = INFINITY;
         xs[row] = 0;
 
         for (size_t col = 0; col < conv.w; col++) {
-            float val = *at(conv, col, row);
+            float val = *at(conv, col, row) + *at(bias, col, row);
             if (val < cmp && *at(mask, col, row) == 0.0f) {
                 cmp = val;
                 xs[row] = col;
@@ -385,7 +351,7 @@ void scan_voids(array mask, array conv, size_t *xs) {
     }
 }
 
-void clear_cluster(array mask, array kern, array conv, array work, size_t *x, size_t *y, size_t *cxs, size_t *vxs) {
+void clear_cluster(array mask, array kern, array conv, array work, array bias, size_t *x, size_t *y, size_t *cxs, size_t *vxs) {
     size_t mid = kern.w / 2;
     float cmp = -INFINITY;
 
@@ -395,7 +361,7 @@ void clear_cluster(array mask, array kern, array conv, array work, size_t *x, si
 #ifdef PARANOID
     for (size_t row = 0; row < conv.h; row++) {
         for (size_t col = 0; col < conv.w; col++) {
-            float val = *at(conv, col, row);
+            float val = *at(conv, col, row) + *at(bias, col, row);
             if (val > cmp && *at(mask, col + mid, row + mid) == 1.0f) {
                 cmp = val;
                 *x = col;
@@ -408,7 +374,7 @@ void clear_cluster(array mask, array kern, array conv, array work, size_t *x, si
 #else
     for (size_t row = 0; row < conv.h; row++) {
         size_t col = cxs[row];
-        float val = *at(conv, col, row);
+        float val = *at(conv, col, row) + *at(bias, col, row);
 
         if (val > cmp && *at(mask, col + mid, row + mid) == 1.0f) {
             cmp = val;
@@ -424,7 +390,7 @@ void clear_cluster(array mask, array kern, array conv, array work, size_t *x, si
         
         cmp = -INFINITY;
         for (size_t col = 0; col < conv.w; col++) {
-            float val = *at(conv, col, row);
+            float val = *at(conv, col, row) + *at(bias, col, row);
             if (val > cmp && *at(mask, col + mid, row + mid) == 1.0f) {
                 cmp = val;
                 cxs[row] = col;
@@ -433,7 +399,7 @@ void clear_cluster(array mask, array kern, array conv, array work, size_t *x, si
 
         cmp = INFINITY;
         for (size_t col = 0; col < conv.w; col++) {
-            float val = *at(conv, col, row);
+            float val = *at(conv, col, row) + *at(bias, col, row);
             if (val < cmp && *at(mask, col + mid, row + mid) == 0.0f) {
                 cmp = val;
                 vxs[row] = col;
@@ -443,7 +409,7 @@ void clear_cluster(array mask, array kern, array conv, array work, size_t *x, si
 #endif
 }
 
-void fill_void(array mask, array kern, array conv, array work, size_t *x, size_t *y, size_t *cxs, size_t *vxs) {
+void fill_void(array mask, array kern, array conv, array work, array bias, size_t *x, size_t *y, size_t *cxs, size_t *vxs) {
     size_t mid = kern.w / 2;
     float cmp = INFINITY;
 
@@ -453,7 +419,7 @@ void fill_void(array mask, array kern, array conv, array work, size_t *x, size_t
 #ifdef PARANOID
     for (size_t row = 0; row < conv.h; row++) {
         for (size_t col = 0; col < conv.w; col++) {
-            float val = *at(conv, col, row);
+            float val = *at(conv, col, row) + *at(bias, col, row);
             if (val < cmp && *at(mask, col + mid, row + mid) == 0.0f) {
                 cmp = val;
                 *x = col;
@@ -466,7 +432,7 @@ void fill_void(array mask, array kern, array conv, array work, size_t *x, size_t
 #else
     for (size_t row = 0; row < conv.h; row++) {
         size_t col = vxs[row];
-        float val = *at(conv, col, row);
+        float val = *at(conv, col, row) + *at(bias, col, row);
 
         if (val < cmp && *at(mask, col + mid, row + mid) == 0.0f) {
             cmp = val;
@@ -482,7 +448,7 @@ void fill_void(array mask, array kern, array conv, array work, size_t *x, size_t
         
         cmp = -INFINITY;
         for (size_t col = 0; col < conv.w; col++) {
-            float val = *at(conv, col, row);
+            float val = *at(conv, col, row) + *at(bias, col, row);
             if (val > cmp && *at(mask, col + mid, row + mid) == 1.0f) {
                 cmp = val;
                 cxs[row] = col;
@@ -491,7 +457,7 @@ void fill_void(array mask, array kern, array conv, array work, size_t *x, size_t
 
         cmp = INFINITY;
         for (size_t col = 0; col < conv.w; col++) {
-            float val = *at(conv, col, row);
+            float val = *at(conv, col, row) + *at(bias, col, row);
             if (val < cmp && *at(mask, col + mid, row + mid) == 0.0f) {
                 cmp = val;
                 vxs[row] = col;
@@ -501,7 +467,7 @@ void fill_void(array mask, array kern, array conv, array work, size_t *x, size_t
 #endif
 }
 
-void relax(array mask, array kern, array conv, array work, size_t *cxs, size_t *vxs) {
+void relax(array mask, array kern, array conv, array work, array bias, size_t *cxs, size_t *vxs) {
     size_t cx, cy;
     size_t vx, vy;
 
@@ -510,17 +476,17 @@ void relax(array mask, array kern, array conv, array work, size_t *cxs, size_t *
     array inset = slice(mask, from_to(mid, mid + conv.w), from_to(mid, mid + conv.h));
 
     conv2d(mask, kern, conv, work);
-    scan_clusters(inset, conv, cxs);
-    scan_voids(inset, conv, vxs);
+    scan_clusters(inset, conv, bias, cxs);
+    scan_voids(inset, conv, bias, vxs);
 
     do {
-        clear_cluster(mask, kern, conv, work, &cx, &cy, cxs, vxs);
+        clear_cluster(mask, kern, conv, work, bias, &cx, &cy, cxs, vxs);
 
-        fill_void(mask, kern, conv, work, &vx, &vy, cxs, vxs);
+        fill_void(mask, kern, conv, work, bias, &vx, &vy, cxs, vxs);
     } while (cx != vx || cy != vy);
 }
 
-array blue_noise(array mask, array kern) {
+array blue_noise(array mask, array kern, array bias) {
     size_t w = mask.w;
     size_t h = mask.h;
     size_t pixels = w * h;
@@ -547,24 +513,24 @@ array blue_noise(array mask, array kern) {
     size_t *cxs = malloc(sizeof(*cxs) * h);
     size_t *vxs = malloc(sizeof(*vxs) * h);
 
-    relax(mask, kern, conv, work, cxs, vxs);
+    relax(mask, kern, conv, work, bias, cxs, vxs);
     copy_arr(backup, mask);
     write_pbm(mask_name, inset_mask);
 
     for (size_t i = rank; i != 0; i--) {
         size_t cx, cy;
-        clear_cluster(backup, kern, conv, work, &cx, &cy, cxs, vxs);
+        clear_cluster(backup, kern, conv, work, bias, &cx, &cy, cxs, vxs);
         *at(values, cx, cy) = (float)(i - 1) / (pixels - 1);
     }
 
     conv2d(mask, kern, conv, work);
     copy_arr(backup, mask);
-    scan_clusters(inset_mask, conv, cxs);
-    scan_voids(inset_mask, conv, vxs);
+    scan_clusters(inset_mask, conv, bias, cxs);
+    scan_voids(inset_mask, conv, bias, vxs);
 
     for (size_t i = rank; i < pixels; i++) {
         size_t vx, vy;
-        fill_void(mask, kern, conv, work, &vx, &vy, cxs, vxs);
+        fill_void(mask, kern, conv, work, bias, &vx, &vy, cxs, vxs);
         *at(values, vx, vy) = (float)i / (pixels - 1);
     }
 
@@ -602,6 +568,7 @@ int main(int argc, char **argv) {
 
     array kern;
     array mask;
+    array bias;
     array image;
 
     uint32_t seed = 0;
@@ -723,9 +690,12 @@ int main(int argc, char **argv) {
 
     permute(mask.mem, width * height, seed);
 
+    bias = new_array(width, height);
+    white_noise(bias, *at(kern, 0, 0) * *at(kern, 0, 0));
+
     write_pbm(initial_mask_name, mask);
 
-    image = blue_noise(mask, kern);
+    image = blue_noise(mask, kern, bias);
 
     write_pgm(noise_name, image, UINT16_MAX);
 
