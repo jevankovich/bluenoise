@@ -656,7 +656,7 @@ int main(int argc, char **argv) {
     }
 
     {
-        value = strtol(argv[optind], &end, 0);
+        value = strtol(argv[optind++], &end, 0);
         if (*end) {
             fprintf(stderr, "Could not parse width\n");
             return 1;
@@ -669,7 +669,7 @@ int main(int argc, char **argv) {
     }
 
     {
-        value = strtol(argv[optind], &end, 0);
+        value = strtol(argv[optind++], &end, 0);
         if (*end) {
             fprintf(stderr, "Could not parse height\n");
             return 1;
