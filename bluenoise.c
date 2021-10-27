@@ -13,6 +13,40 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
+/*
+ * bluenoise is a fast program for generating blue noise patterns. That is,
+ * patterns of noise that have little-to-no discernible large-scale structure.
+ * This noise is "blue" because it is primarily high frequency, the low
+ * frequency content is suppressed compared to white noise.
+ * 
+ * Blue noise tends to be very agreeable as a dither for computer graphics, and
+ * in most treatments it retains all of its nice properties when tiled or
+ * cropped.
+ * 
+ * However, smaller dither patterns can still give noticeable patterns when
+ * tiled, so having the ability to easily generate arbitrarily large patterns
+ * can be quite advantageous.
+ * 
+ * The process I follow is based on the process described by Dr. Ulichney in
+ * 1993. His paper can be found here:
+ *   http://cv.ulichney.com/papers/1993-void-cluster.pdf
+ * 
+ * For the sake of performance and simplicity of implementation, some
+ * simplifying assumptions are made. The first and most impactful is to
+ * approximate the gaussian filter with a binomial expansion. Since this filter
+ * kernel has finite support, each update to the dither mask only affects the
+ * results of the convolution immediately nearby it.
+ * 
+ * As a result of the finite kernel, the selection process for the next cluster
+ * or void is biased toward the left or right/top or bottom of the dither
+ * pattern. One way to avoid this bias is to use a white noise pattern to break
+ * ties. The addition of the white noise pattern eliminates the need for the
+ * prototype binary pattern used by Ulichney as well as the need to have a
+ * process to both fill voids and clear clusters. I  can simply start with a
+ * blank binary pattern and fill voids, using the white noise pattern as a tie-
+ * breaker. In essence, the white noise is the prototype pattern.
+ */
 #define _XOPEN_SOURCE 600
 
 #include <stdbool.h>
@@ -31,10 +65,14 @@
 #define MAX(x, y) ((x) > (y) ? (x) : (y))
 #define MIN(x, y) ((x) < (y) ? (x) : (y))
 
-typedef struct {
+typedef struct array {
     float *mem;
     size_t w, h; // Width and height
     size_t xs, ys; // x-stride and y-stride
+
+    // This could be better, maybe reference counting or something, but works
+    // for this simple use case.
+    float *root_mem;
 } array;
 
 typedef struct {
@@ -44,8 +82,6 @@ typedef struct {
 } range;
 
 char name_suffix[128];
-char initial_mask_name[NAME_MAX + 1];
-char mask_name[NAME_MAX + 1];
 char noise_name[NAME_MAX + 1];
 
 array new_array(size_t w, size_t h) {
@@ -67,7 +103,11 @@ static inline range from_to_by(size_t from, size_t to, size_t by) {
 }
 
 void free_array(array arr) {
-    free(arr.mem);
+    if (arr.root_mem) {
+        free(arr.root_mem);
+    } else {
+        free(arr.mem);
+    }
 }
 
 static inline float *at(array arr, size_t x, size_t y) {
@@ -93,6 +133,7 @@ static inline array slice(array arr, range x, range y) {
         .h = h,
         .xs = arr.xs * x.by,
         .ys = arr.ys * y.by,
+        .root_mem = arr.root_mem ? arr.root_mem : arr.mem,
     };
 }
 
@@ -153,7 +194,21 @@ void conv1d(array in, array kern, array out) {
     }
 }
 
-void conv2d(array in, array kern, array out, array work) {
+void conv1d_boolean(array in, array kern, array out) {
+    assert(in.h == 1);
+    assert(kern.h == 1);
+    assert(out.h == 1);
+    assert(size(in) <= size(out) + size(kern) - 1);
+
+    zero_arr(out);
+    for (size_t i = 0; i < out.w; i++) {
+        for (size_t k = 0; k < kern.w; k++) {
+            *at(out, i, 0) += *at(kern, k, 0) * (*at(in, i + kern.w - 1 - k, 0) != 0);
+        }
+    }
+}
+
+void conv2d_boolean(array in, array kern, array out, array work) {
     assert(kern.h == 1);
     assert(in.w == out.w + kern.w - 1);
     assert(in.h == out.h + kern.w - 1);
@@ -161,7 +216,7 @@ void conv2d(array in, array kern, array out, array work) {
     assert(work.h == in.h);
 
     for (size_t ri = 0; ri < work.h; ri++) {
-        conv1d(row(in, ri), kern, row(work, ri));
+        conv1d_boolean(row(in, ri), kern, row(work, ri));
     }
 
     for (size_t ci = 0; ci < out.w; ci++) {
@@ -198,8 +253,6 @@ void set_repeat(array arr, size_t dilation, size_t x, size_t y, float val) {
 }
 
 void conv2d_set(array in, array kern, array out, float *work, size_t x, size_t y, float val) {
-    size_t mid = kern.w / 2;
-
     assert(in.w == out.w + kern.w - 1);
     assert(in.h == out.h + kern.w - 1);
 
@@ -208,22 +261,26 @@ void conv2d_set(array in, array kern, array out, float *work, size_t x, size_t y
 #ifdef PARANOID
     {
         array work_arr = (array){.mem = work, .w = out.w, .h = in.h, .xs = 1, .ys = out.w};
-        conv2d(in, kern, out, work_arr);
+        conv2d_boolean(in, kern, out, work_arr);
     }
 #else
-    for (size_t row = (y + mid) % out.h; row < in.h; row += out.h) {
-        for (size_t col = (x + mid) % out.w; col < in.w; col += out.w) {
-            range out_x_range = from_to(col - MIN(kern.w - 1, col), MIN(out.w, col + 1));
-            range out_y_range = from_to(row - MIN(kern.w - 1, row), MIN(out.h, row + 1));
+    {
+        size_t mid = kern.w / 2;
 
-            range in_x_range = from_to(out_x_range.from, out_x_range.to + kern.w - 1);
-            range in_y_range = from_to(out_y_range.from, out_y_range.to + kern.w - 1);
+        for (size_t row = (y + mid) % out.h; row < in.h; row += out.h) {
+            for (size_t col = (x + mid) % out.w; col < in.w; col += out.w) {
+                range out_x_range = from_to(col - MIN(kern.w - 1, col), MIN(out.w, col + 1));
+                range out_y_range = from_to(row - MIN(kern.w - 1, row), MIN(out.h, row + 1));
 
-            array in_slice = slice(in, in_x_range, in_y_range);
-            array out_slice = slice(out, out_x_range, out_y_range);
-            array work_arr = (array){.mem = work, .w = out_slice.w, .h = in_slice.h, .xs = 1, .ys = out_slice.w};
+                range in_x_range = from_to(out_x_range.from, out_x_range.to + kern.w - 1);
+                range in_y_range = from_to(out_y_range.from, out_y_range.to + kern.w - 1);
 
-            conv2d(in_slice, kern, out_slice, work_arr);
+                array in_slice = slice(in, in_x_range, in_y_range);
+                array out_slice = slice(out, out_x_range, out_y_range);
+                array work_arr = (array){.mem = work, .w = out_slice.w, .h = in_slice.h, .xs = 1, .ys = out_slice.w};
+
+                conv2d_boolean(in_slice, kern, out_slice, work_arr);
+            }
         }
     }
 #endif
@@ -336,29 +393,14 @@ void write_pbm(const char *fname, array data) {
     fclose(f);
 }
 
-void scan_clusters(array mask, array conv, array bias, size_t *xs) {
-    for (size_t row = 0; row < conv.h; row++) {
-        float cmp = -INFINITY;
-        xs[row] = 0;
-
-        for (size_t col = 0; col < conv.w; col++) {
-            float val = *at(conv, col, row) + *at(bias, col, row);
-            if (val > cmp && *at(mask, col, row) == 1.0f) {
-                cmp = val;
-                xs[row] = col;
-            }
-        }
-    }
-}
-
-void scan_voids(array mask, array conv, array bias, size_t *xs) {
+void scan_voids(array values, array conv, array bias, size_t *xs) {
     for (size_t row = 0; row < conv.h; row++) {
         float cmp = INFINITY;
         xs[row] = 0;
 
         for (size_t col = 0; col < conv.w; col++) {
             float val = *at(conv, col, row) + *at(bias, col, row);
-            if (val < cmp && *at(mask, col, row) == 0.0f) {
+            if (val < cmp && *at(values, col, row) == 0.0f) {
                 cmp = val;
                 xs[row] = col;
             }
@@ -366,210 +408,77 @@ void scan_voids(array mask, array conv, array bias, size_t *xs) {
     }
 }
 
-void clear_cluster(array mask, array kern, array conv, array work, array bias, size_t *x, size_t *y, size_t *cxs, size_t *vxs) {
-    size_t mid = kern.w / 2;
-    float cmp = -INFINITY;
-
-    *x = 0;
-    *y = 0;
-
-#ifdef PARANOID
-    for (size_t row = 0; row < conv.h; row++) {
-        for (size_t col = 0; col < conv.w; col++) {
-            float val = *at(conv, col, row) + *at(bias, col, row);
-            if (val > cmp && *at(mask, col + mid, row + mid) == 1.0f) {
-                cmp = val;
-                *x = col;
-                *y = row;
-            }
-        }
-    }
-
-    conv2d_set(mask, kern, conv, work.mem, *x, *y, 0);
-#else
-    for (size_t row = 0; row < conv.h; row++) {
-        size_t col = cxs[row];
-        float val = *at(conv, col, row) + *at(bias, col, row);
-
-        if (val > cmp && *at(mask, col + mid, row + mid) == 1.0f) {
-            cmp = val;
-            *x = col;
-            *y = row;
-        }
-    }
-
-    conv2d_set(mask, kern, conv, work.mem, *x, *y, 0);
-
-    for (size_t k = 0; k < kern.w; k++) {
-        size_t row = (conv.h + *y + k - mid) % conv.h;
-        
-        cmp = -INFINITY;
-        for (size_t col = 0; col < conv.w; col++) {
-            float val = *at(conv, col, row) + *at(bias, col, row);
-            if (val > cmp && *at(mask, col + mid, row + mid) == 1.0f) {
-                cmp = val;
-                cxs[row] = col;
-            }
-        }
-
-        cmp = INFINITY;
-        for (size_t col = 0; col < conv.w; col++) {
-            float val = *at(conv, col, row) + *at(bias, col, row);
-            if (val < cmp && *at(mask, col + mid, row + mid) == 0.0f) {
-                cmp = val;
-                vxs[row] = col;
-            }
-        }
-    }
-#endif
-}
-
-void fill_void(array mask, array kern, array conv, array work, array bias, size_t *x, size_t *y, size_t *cxs, size_t *vxs) {
+void fill_void(array values, array kern, array conv, array work, array bias, size_t *vxs, float value) {
     size_t mid = kern.w / 2;
     float cmp = INFINITY;
 
-    *x = 0;
-    *y = 0;
+    size_t x = 0, y = 0;
 
-#ifdef PARANOID
-    for (size_t row = 0; row < conv.h; row++) {
-        for (size_t col = 0; col < conv.w; col++) {
-            float val = *at(conv, col, row) + *at(bias, col, row);
-            if (val < cmp && *at(mask, col + mid, row + mid) == 0.0f) {
-                cmp = val;
-                *x = col;
-                *y = row;
-            }
-        }
-    }
-
-    conv2d_set(mask, kern, conv, work.mem, *x, *y, 1);
-#else
     for (size_t row = 0; row < conv.h; row++) {
         size_t col = vxs[row];
         float val = *at(conv, col, row) + *at(bias, col, row);
 
-        if (val < cmp && *at(mask, col + mid, row + mid) == 0.0f) {
+        if (val < cmp && *at(values, col + mid, row + mid) == 0.0f) {
             cmp = val;
-            *x = col;
-            *y = row;
+            x = col;
+            y = row;
         }
     }
 
-    conv2d_set(mask, kern, conv, work.mem, *x, *y, 1);
+    conv2d_set(values, kern, conv, work.mem, x, y, value);
 
     for (size_t k = 0; k < kern.w; k++) {
-        size_t row = (conv.h + *y + k - mid) % conv.h;
-        
-        cmp = -INFINITY;
-        for (size_t col = 0; col < conv.w; col++) {
-            float val = *at(conv, col, row) + *at(bias, col, row);
-            if (val > cmp && *at(mask, col + mid, row + mid) == 1.0f) {
-                cmp = val;
-                cxs[row] = col;
-            }
-        }
+        size_t row = (conv.h + y + k - mid) % conv.h;
 
         cmp = INFINITY;
         for (size_t col = 0; col < conv.w; col++) {
             float val = *at(conv, col, row) + *at(bias, col, row);
-            if (val < cmp && *at(mask, col + mid, row + mid) == 0.0f) {
+            if (val < cmp && *at(values, col + mid, row + mid) == 0.0f) {
                 cmp = val;
                 vxs[row] = col;
             }
         }
     }
-#endif
 }
 
-void relax(array mask, array kern, array conv, array work, array bias, size_t *cxs, size_t *vxs) {
-    size_t cx, cy;
-    size_t vx, vy;
-
-    size_t mid = kern.w / 2;
-
-    array inset = slice(mask, from_to(mid, mid + conv.w), from_to(mid, mid + conv.h));
-
-    conv2d(mask, kern, conv, work);
-    scan_clusters(inset, conv, bias, cxs);
-    scan_voids(inset, conv, bias, vxs);
-
-    do {
-        clear_cluster(mask, kern, conv, work, bias, &cx, &cy, cxs, vxs);
-
-        fill_void(mask, kern, conv, work, bias, &vx, &vy, cxs, vxs);
-    } while (cx != vx || cy != vy);
-}
-
-array blue_noise(array mask, array kern, array bias) {
-    size_t w = mask.w;
-    size_t h = mask.h;
+array blue_noise(array kern, array bias) {
+    size_t w = bias.w;
+    size_t h = bias.h;
     size_t pixels = w * h;
     size_t mid = kern.w / 2;
 
-    size_t rank = 0;
-    for (size_t row = 0; row < mask.h; row++) {
-        for (size_t col = 0; col < mask.w; col++) {
-            if (*at(mask, col, row)) {
-                rank++;
-            }
-        }
-    }
+    array values = new_array(w + kern.w - 1, h + kern.w - 1);
+    array inset_values = slice(values, from_to(mid, mid + w), from_to(mid, mid + h));
 
-    mask = repeat2d(mask, kern.w);
+    assert(inset_values.w == w);
+    assert(inset_values.h == h);
 
-    array backup = new_array(mask.w, mask.h);
-    array inset_mask = slice(backup, from_to(mid, mid + w), from_to(mid, mid + h));
-
-    array values = new_array(w, h);
     array conv = new_array(w, h);
-    array work = new_array(w, mask.h);
+    array work = new_array(w, values.h);
 
-    size_t *cxs = malloc(sizeof(*cxs) * h);
     size_t *vxs = malloc(sizeof(*vxs) * h);
 
-    relax(mask, kern, conv, work, bias, cxs, vxs);
-    copy_arr(backup, mask);
-    write_pbm(mask_name, inset_mask);
+    // conv2d(values, kern, conv, work); // unnecessary because values is all 0
+    scan_voids(inset_values, conv, bias, vxs);
 
-    for (size_t i = rank; i != 0; i--) {
-        size_t cx, cy;
-        clear_cluster(backup, kern, conv, work, bias, &cx, &cy, cxs, vxs);
-        *at(values, cx, cy) = (float)(i - 1) / (pixels - 1);
+    for (size_t i = 0; i < pixels; i++) {
+        fill_void(values, kern, conv, work, bias, vxs, (float)(i + 1) / (pixels));
     }
 
-    conv2d(mask, kern, conv, work);
-    copy_arr(backup, mask);
-    scan_clusters(inset_mask, conv, bias, cxs);
-    scan_voids(inset_mask, conv, bias, vxs);
-
-    for (size_t i = rank; i < pixels; i++) {
-        size_t vx, vy;
-        fill_void(mask, kern, conv, work, bias, &vx, &vy, cxs, vxs);
-        *at(values, vx, vy) = (float)i / (pixels - 1);
-    }
-
-    free_array(mask);
-    free_array(backup);
     free_array(conv);
     free_array(work);
 
-    free(cxs);
     free(vxs);
 
-    return values;
+    return inset_values;
 }
 
 void usage(FILE *f, char *prog) {
     fprintf(f, "Usage: %s [options] width height\n\n", prog);
-    fprintf(f, "-n numerator\tThe numerator used to determine the fraction of pixels set\n"
-               "\t\tin the initial mask. (Default: 1)\n");
-    fprintf(f, "-d denominator\tThe denominator used to determine the fraction of pixels set\n"
-               "\t\tin the initial mask. (Default: 10)\n");
     fprintf(f, "-c kernel size\tThe size of the kernel to use in filtering. The original\n"
                "\t\tpaper recommends a kernel with std-deviation of 1.5.\n"
                "\t\tThe std-deviation of the kernel is sqrt(n/4). (Default: 9)\n");
-    fprintf(f, "-s seed\t\tThe seed to use for the RNG when generating the initial mask\n"
+    fprintf(f, "-s seed\t\tThe seed to use for the RNG when generating the initial noise pattern\n"
                "\t\t(Default: 0)\n");
 }
 
@@ -579,42 +488,16 @@ int main(int argc, char **argv) {
     long value;
 
     size_t width, height;
-    uint32_t fracn = 1, fracd = 10;
 
     array kern;
-    array mask;
     array bias;
     array image;
 
     uint32_t seed = 0;
     size_t conv_size = 9; // The paper recommends sigma = 1.5. 9 gets us to 1.5
 
-    while ((c = getopt(argc, argv, "hn:d:c:s:")) != -1) {
+    while ((c = getopt(argc, argv, "hc:s:")) != -1) {
         switch(c) {
-        case 'n':
-            value = strtol(optarg, &end, 0);
-            if (*end) {
-                fprintf(stderr, "Could not parse -n argument\n");
-                continue;
-            }
-            if (value <= 0) {
-                fprintf(stderr, "The argument to -n must be positive\n");
-                continue;
-            }
-            fracn = value;
-            break;
-        case 'd':
-            value = strtol(optarg, &end, 0);
-            if (*end) {
-                fprintf(stderr, "Could not parse -%c argument\n", c);
-                continue;
-            }
-            if (value <= 0) {
-                fprintf(stderr, "The argument to -%c must be positive\n", c);
-                continue;
-            }
-            fracd = value;
-            break;
         case 'c':
             value = strtol(optarg, &end, 0);
             if (*end) {
@@ -681,40 +564,19 @@ int main(int argc, char **argv) {
         height = value;
     }
 
-    if (fracn * 2 >= fracd) {
-        fprintf(stderr, "Given fraction is greater than 1/2\n");
-        exit(EXIT_FAILURE);
-    }
-
-    // if (sqrt(fracn / fracd) <= 2 / conv_size)
-    if (fracd >= fracn * conv_size * conv_size / 4) {
-        fprintf(stderr, "Warning: it is expected that each pixel in the mask will have fewer than one neighbor\n");
-    }
-
-    snprintf(name_suffix, sizeof(name_suffix), "%zux%zu_n%"PRIu32"_d%"PRIu32"_s%"PRIu32, width, height, fracn, fracd, seed);
-    snprintf(initial_mask_name, sizeof(initial_mask_name), "initial_mask_%s.pbm", name_suffix);
-    snprintf(mask_name, sizeof(mask_name), "mask_%s.pbm", name_suffix);
+    snprintf(name_suffix, sizeof(name_suffix), "%zux%zu_c%zu_s%"PRIu32, width, height, conv_size, seed);
     snprintf(noise_name, sizeof(noise_name), "noise_%s.pgm", name_suffix);
 
     kern = binomial(conv_size);
 
-    mask = new_array(width, height);
-    for (size_t i = 0; i < width * height; i++) {
-        mask.mem[i] = (i * fracd) < (width * height * fracn);
-    }
-
-    permute(mask.mem, width * height, seed);
-
     bias = new_array(width, height);
     white_noise(bias, *at(kern, 0, 0) * *at(kern, 0, 0));
 
-    write_pbm(initial_mask_name, mask);
-
-    image = blue_noise(mask, kern, bias);
+    image = blue_noise(kern, bias);
 
     write_pgm(noise_name, image, UINT16_MAX);
 
     free_array(kern);
-    free_array(mask);
+    free_array(bias);
     free_array(image);
 }
